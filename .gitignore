@@ -1,0 +1,39 @@
+# ============================================================
+#  Inception - .gitignore
+#  RAPPEL SUJET : tout credential/mot de passe/clé trouvé
+#  dans le repo Git = ÉCHEC du projet. On blinde ici.
+# ============================================================
+
+# --- Variables d'environnement (mots de passe, config) ---
+.env
+*.env
+srcs/.env
+
+# --- Secrets (mots de passe, credentials, clés) ---
+secrets/
+*_password.txt
+credentials.txt
+
+# --- Certificats / clés TLS (générés dans la VM) ---
+*.pem
+*.key
+*.crt
+*.csr
+
+# --- Images de VM (trop lourdes, jamais dans git) ---
+*.vdi
+*.vmdk
+*.ova
+*.vbox
+*.vbox-prev
+
+# --- Logs / artefacts ---
+*.log
+
+# --- Fichiers OS / éditeurs ---
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
