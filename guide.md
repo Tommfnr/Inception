@@ -163,6 +163,12 @@ On teste chaque service avant de passer au suivant.
 
 ## Étape 1 — Le squelette
 
+> ⚠️ **NOMMAGE EXACT — un seul caractère faux = refus à l'éval.**
+> - Le dossier est **`srcs`** (avec un **s**), **pas** `src`.
+> - Le fichier est **`docker-compose.yml`**, **pas** `dockers-compose.yml`.
+> - Les images/services : `mariadb`, `wordpress`, `nginx` (au singulier, minuscules).
+> - Chaque service a **`Dockerfile`** (D majuscule), `conf/` et `tools/`.
+
 Arborescence **imposée** :
 
 ```bash
@@ -271,13 +277,24 @@ ENTRYPOINT ["init.sh"]
 [mysqld]
 skip-networking=0
 skip-name-resolve
-bind-address=0.0.0.0          # écoute sur le réseau docker (pas juste localhost)
+bind-address=0.0.0.0
 port=3306
 datadir=/var/lib/mysql
 socket=/run/mysqld/mysqld.sock
 ```
-> `bind-address=0.0.0.0` est **indispensable** : sinon WordPress (autre conteneur)
-> ne peut pas se connecter.
+**Ligne par ligne :**
+| Ligne | Signification |
+|---|---|
+| `[mysqld]` | En-tête de section : tout ce qui suit configure le **serveur** `mysqld`. |
+| `skip-networking=0` | **Active le réseau TCP/IP.** À `1` la DB ne serait joignable que localement → WordPress (autre conteneur) ne pourrait pas se connecter. |
+| `skip-name-resolve` | Pas de résolution DNS inverse des clients → connexions plus rapides, pas de blocage DNS. Les droits se définissent par IP/`%` (déjà le cas). |
+| `bind-address=0.0.0.0` | Écoute sur **toutes** les interfaces → joignable via le réseau docker. `127.0.0.1` donnerait `Connection refused` côté WordPress. |
+| `port=3306` | Port d'écoute standard MariaDB. Visé par WordPress avec `--dbhost=mariadb:3306`. |
+| `datadir=/var/lib/mysql` | Répertoire physique des données (bases) → **branché sur le volume** pour la persistance. |
+| `socket=/run/mysqld/mysqld.sock` | Socket Unix pour les connexions **locales** dans le conteneur (script d'init). Dossier créé/`chown` dans le Dockerfile. |
+> **Le trio clé** `skip-networking=0` + `bind-address=0.0.0.0` + `port=3306` rend
+> MariaDB **joignable par WordPress**. `datadir`/`socket` disent **où** sont les
+> données et **par où** passent les connexions locales.
 
 ### `srcs/requirements/mariadb/tools/init.sh`
 ```sh
@@ -360,7 +377,7 @@ ENTRYPOINT ["init.sh"]
 [www]
 user = nobody
 group = nobody
-listen = 9000                 ; NGINX joindra wordpress:9000
+listen = 9000
 listen.owner = nobody
 listen.group = nobody
 pm = dynamic
@@ -369,8 +386,21 @@ pm.start_servers = 2
 pm.min_spare_servers = 1
 pm.max_spare_servers = 3
 ```
-> `listen = 9000` (et pas un socket unix) → **essentiel** pour que NGINX,
-> dans un autre conteneur, atteigne php-fpm via le réseau.
+**Ligne par ligne :**
+| Ligne | Signification |
+|---|---|
+| `[www]` | Nom du **pool** php-fpm (un pool = un groupe de processus PHP). Ici un seul pool nommé `www`. |
+| `user = nobody` / `group = nobody` | **Sous quelle identité** tournent les processus PHP. `nobody` = utilisateur non privilégié → sécurité (le PHP ne tourne pas en root). |
+| `listen = 9000` | php-fpm écoute sur le **port TCP 9000** (et non un socket unix local). **Essentiel** : NGINX, dans un autre conteneur, l'atteint via `wordpress:9000`. |
+| `listen.owner = nobody` / `listen.group = nobody` | Propriétaire du point d'écoute → cohérent avec `user/group`, évite les soucis de permissions. |
+| `pm = dynamic` | **Process manager dynamique** : php-fpm ajuste le nombre de processus enfants selon la charge (entre les bornes ci-dessous). |
+| `pm.max_children = 5` | Nombre **max** de processus PHP simultanés (plafond). |
+| `pm.start_servers = 2` | Nombre de processus **au démarrage**. |
+| `pm.min_spare_servers = 1` | Minimum de processus **en attente** (prêts à servir). |
+| `pm.max_spare_servers = 3` | Maximum de processus en attente (au-delà, php-fpm en tue). |
+> **Ce qui compte pour le sujet** : `listen = 9000` (TCP, pas socket) → c'est ce qui
+> permet à NGINX (autre conteneur) de joindre php-fpm. Les `pm.*` sont du réglage de
+> perf, tu peux garder ces valeurs.
 
 ### `srcs/requirements/wordpress/tools/init.sh`
 ```sh
@@ -448,6 +478,18 @@ COPY conf/nginx.conf /etc/nginx/nginx.conf
 EXPOSE 443
 ENTRYPOINT ["nginx", "-g", "daemon off;"]
 ```
+**La commande `openssl`, morceau par morceau :**
+| Bout | Rôle |
+|---|---|
+| `openssl req` | Génère une **requête/certificat** X.509. |
+| `-x509` | Produit directement un **certificat auto-signé** (pas une simple demande à signer par une autorité). |
+| `-nodes` | *"no DES"* → la clé privée **n'est pas chiffrée** par un mot de passe (sinon NGINX demanderait une passphrase au démarrage). |
+| `-days 365` | Certificat **valide 1 an**. |
+| `-newkey rsa:2048` | Génère **en même temps** une nouvelle clé RSA de 2048 bits. |
+| `-keyout ...key` / `-out ...crt` | Où écrire la **clé privée** et le **certificat**. |
+| `-subj "/CN=tfournie.42.fr"` | Remplit le sujet du certificat **sans prompt interactif**. Le `CN` (Common Name) = ton domaine. |
+> Auto-signé = le navigateur affichera un avertissement (normal en local). En CLI on
+> utilisera `curl -k` pour l'ignorer.
 
 ### `srcs/requirements/nginx/conf/nginx.conf`
 ```nginx
@@ -481,13 +523,28 @@ http {
     }
 }
 ```
-**Idées clés :**
-- `listen 443 ssl` **uniquement** → pas de port 80, pas d'autre entrée.
-- `ssl_protocols TLSv1.2 TLSv1.3` → exigence stricte du sujet.
-- `fastcgi_pass wordpress:9000` → NGINX délègue le PHP à php-fpm (autre conteneur).
-- `root /var/www/html` = **même volume** que WordPress → NGINX sert les fichiers
-  statiques, php-fpm exécute le PHP.
-- `nginx -g "daemon off;"` → foreground, PID 1. ✅
+**Ligne par ligne :**
+| Ligne | Signification |
+|---|---|
+| `events {}` | Bloc **obligatoire** dans une config NGINX (gestion des connexions). Vide = valeurs par défaut, suffisant ici. |
+| `http { ... }` | Contexte des réglages **web** (HTTP/HTTPS). Tout le serveur vit dedans. |
+| `include /etc/nginx/mime.types;` | Charge la table des **types de fichiers** (css, js, images…) pour que NGINX envoie le bon `Content-Type`. |
+| `server { ... }` | Définit **un serveur virtuel** (un site). |
+| `listen 443 ssl;` | Écoute **uniquement** sur le port **443 en TLS**. Pas de `listen 80` → une seule porte d'entrée, exigence du sujet. |
+| `server_name tfournie.42.fr;` | Le **nom de domaine** que ce serveur gère. |
+| `ssl_certificate` / `ssl_certificate_key` | Chemins du **certificat** et de la **clé privée** générés dans le Dockerfile. |
+| `ssl_protocols TLSv1.2 TLSv1.3;` | **Autorise seulement** TLS 1.2 et 1.3 (exigence stricte). Les versions plus anciennes (TLS 1.0/1.1, SSLv3) sont refusées. |
+| `root /var/www/html;` | **Racine des fichiers** servis = le **volume partagé** avec WordPress. |
+| `index index.php;` | Fichier servi par défaut pour un dossier. |
+| `location / { try_files ... }` | Pour toute URL : essaie le fichier, puis le dossier, sinon renvoie vers `index.php` (routage WordPress = *permaliens*). |
+| `location ~ \.php$ { ... }` | Bloc **spécifique aux fichiers `.php`** (le `~` = correspondance regex). |
+| `fastcgi_pass wordpress:9000;` | **Transmet le PHP** à php-fpm via le réseau docker (conteneur `wordpress`, port 9000). C'est le cœur du reverse proxy. |
+| `fastcgi_index index.php;` | Fichier PHP par défaut si l'URL cible un dossier. |
+| `include fastcgi_params;` | Charge les **variables standard** FastCGI (méthode, URI, headers…). |
+| `fastcgi_param SCRIPT_FILENAME ...;` | Indique à php-fpm **quel fichier .php exécuter** (chemin absolu = racine + script). |
+> **À retenir** : NGINX **sert les fichiers statiques** (`root`) et **délègue le PHP**
+> à php-fpm (`fastcgi_pass wordpress:9000`). L'`ENTRYPOINT nginx -g "daemon off;"`
+> le garde en **foreground / PID 1**. ✅
 
 ---
 
