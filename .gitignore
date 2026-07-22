@@ -7,7 +7,7 @@
 # --- Variables d'environnement (mots de passe, config) ---
 .env
 *.env
-srcs/.env
+src/.env
 
 # --- Secrets (mots de passe, credentials, clés) ---
 secrets/
