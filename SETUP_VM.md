@@ -26,6 +26,33 @@ usermod -aG sudo tfournie               # autoriser sudo
 ```
 Puis **se déconnecter / reconnecter** pour activer sudo.
 
+## 1bis. Se connecter en SSH depuis l'hôte (optionnel mais confortable)
+
+Permet de bosser depuis son vrai terminal (copier/coller, onglets) au lieu
+de la fenêtre VirtualBox.
+
+**a. Vérifier que le serveur SSH tourne dans la VM :**
+```bash
+sudo systemctl status ssh
+# si absent : sudo apt install -y openssh-server && sudo systemctl enable --now ssh
+```
+
+**b. VirtualBox en NAT — redirection de port** (une seule fois) :
+`Config VM -> Réseau -> Avancé -> Redirection de ports`, ajouter :
+
+| Nom | Proto | IP hôte   | Port hôte | Port invité |
+|-----|-------|-----------|-----------|-------------|
+| ssh | TCP   | 127.0.0.1 | 2222      | 22          |
+
+**c. Depuis l'hôte, se connecter :**
+```bash
+ssh tfournie@127.0.0.1 -p 2222
+ssh-copy-id -p 2222 tfournie@127.0.0.1   # (optionnel) sans retaper le mot de passe
+```
+
+> Si réseau « Accès par pont » (bridged) au lieu de NAT : pas de redirection,
+> récupérer l'IP avec `ip a` puis `ssh tfournie@<IP_de_la_VM>`.
+
 ## 2. Installer Docker + docker compose
 
 ```bash
