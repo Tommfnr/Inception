@@ -5,7 +5,7 @@ DB_PASS=$(cat /run/secrets/db_password)
 DB_ROOT=$(cat /run/secrets/db_root_password)
 
 if [ ! -d /var/lib/mysql/mysql ]; then
-    mysql-install-db --user=mysql --datadir=/var/lib/mysql
+    mariadb-install-db --user=mysql --datadir=/var/lib/mysql --skip-test-db
 
     cat > /tmp/init.sql <<EOF
 CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`;
