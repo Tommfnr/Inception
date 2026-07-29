@@ -56,11 +56,19 @@ Analogie : l'image est une **classe**, le conteneur est un **objet** (instance).
 Recette pour construire une image. Les instructions clés :
 | Instruction | Rôle |
 |---|---|
-| `FROM alpine:3.20` | Image de base (ici Alpine, avant-dernière stable). **Jamais `latest`.** |
+| `FROM alpine:3.23` | Image de base (ici Alpine, avant-dernière stable). **Jamais `latest`.** |
 | `RUN` | Exécute une commande **au build** (installer des paquets…). |
 | `COPY` | Copie un fichier du repo vers l'image. |
 | `EXPOSE` | Documente le port utilisé (informatif). |
 | `ENTRYPOINT` / `CMD` | La commande lancée **au démarrage du conteneur** (le processus PID 1). |
+
+> ⚠️ **« Avant-dernière stable » = une cible mobile.** Alpine sort une version tous les
+> ~6 mois : **vérifie** avant de rendre, ne recopie pas un tuto. État au **29/07/2026** :
+> dernière = **3.24** (sortie 09/06/2026) → **avant-dernière = `3.23`** (sortie 03/12/2025).
+> Pour contrôler (renvoie `v3.23`) :
+> `curl -s https://alpinelinux.org/releases.json | jq -r '[.release_branches[] | select(.rel_branch != "edge")][1].rel_branch'`
+> (ou la page <https://alpinelinux.org/releases/>). Idem côté Debian : stable = **13 trixie**,
+> donc avant-dernière = **12 bookworm**.
 
 ### Les layers (couches)
 Chaque `RUN`/`COPY` crée une **couche** empilée et **mise en cache**. Si tu changes
@@ -320,7 +328,7 @@ utilisateur, ses droits, puis lance `mysqld` en **foreground**.
 
 ### `srcs/requirements/mariadb/Dockerfile`
 ```dockerfile
-FROM alpine:3.20
+FROM alpine:3.23
 
 # Paquets : le serveur MariaDB + le client
 RUN apk update && apk add --no-cache mariadb mariadb-client
@@ -338,7 +346,7 @@ EXPOSE 3306
 ENTRYPOINT ["init.sh"]
 ```
 **Ligne par ligne :**
-- `FROM alpine:3.20` → image de base **Alpine 3.20** (légère, version figée — jamais `latest`). Toutes les instructions suivantes partent de là.
+- `FROM alpine:3.23` → image de base **Alpine 3.23** (légère, version figée — jamais `latest`). Toutes les instructions suivantes partent de là.
 - `# Paquets : le serveur MariaDB + le client` → commentaire.
 - `RUN apk update && apk add --no-cache mariadb mariadb-client` → **au build**, met à jour l'index des paquets (`apk update`) puis installe le serveur `mariadb` et le client `mariadb-client`. `--no-cache` = ne garde pas l'index téléchargé → image plus petite. Le `&&` groupe les deux commandes dans **une seule couche**.
 - `# Dossiers attendus par mariadb` → commentaire.
@@ -517,13 +525,16 @@ docker exec -it mariadb mariadb -u tfournie -p wordpress   # doit se connecter
 
 ### `srcs/requirements/wordpress/Dockerfile`
 ```dockerfile
-FROM alpine:3.20
+FROM alpine:3.23
 
 # PHP + extensions nécessaires à WordPress + fpm
 RUN apk update && apk add --no-cache \
-    php82 php82-fpm php82-mysqli php82-phar php82-json \
-    php82-curl php82-dom php82-mbstring php82-gd php82-xml \
+    php83 php83-fpm php83-mysqli php83-phar php83-session \
+    php83-curl php83-dom php83-mbstring php83-gd php83-xml \
     curl bash
+
+# wp-cli cherche une commande "php" ; Alpine n'installe que "php83"
+RUN ln -sf /usr/bin/php83 /usr/bin/php
 
 # wp-cli : l'outil en ligne de commande pour installer/configurer WordPress
 RUN curl -o /usr/local/bin/wp \
@@ -531,7 +542,7 @@ RUN curl -o /usr/local/bin/wp \
     && chmod +x /usr/local/bin/wp
 
 # Config php-fpm : écouter sur 9000 (réseau), pas sur un socket local
-COPY conf/www.conf /etc/php82/php-fpm.d/www.conf
+COPY conf/www.conf /etc/php83/php-fpm.d/www.conf
 COPY tools/init.sh /usr/local/bin/init.sh
 RUN chmod +x /usr/local/bin/init.sh
 
@@ -542,18 +553,22 @@ EXPOSE 9000
 ENTRYPOINT ["init.sh"]
 ```
 **Ligne par ligne :**
-- `FROM alpine:3.20` → image de base Alpine 3.20 (version figée).
+- `FROM alpine:3.23` → image de base Alpine 3.23 (version figée).
 - `# PHP + extensions nécessaires à WordPress + fpm` → commentaire.
 - `RUN apk update && apk add --no-cache \` → installe (au build) PHP et ses modules. Le `\` continue la commande sur plusieurs lignes.
-- `    php82 php82-fpm php82-mysqli php82-phar php82-json \` → le cœur **PHP 8.2**, **php-fpm** (le gestionnaire FastCGI), `mysqli` (connexion MariaDB), `phar` (archives PHP, requis par wp-cli), `json`.
-- `    php82-curl php82-dom php82-mbstring php82-gd php82-xml \` → modules requis par WordPress : `curl` (requêtes HTTP), `dom`/`xml` (XML), `mbstring` (chaînes multi-octets), `gd` (images).
+- `    php83 php83-fpm php83-mysqli php83-phar php83-session \` → le cœur **PHP 8.3** (la version packagée par Alpine 3.23 ; `php82` **n'existe plus** dans ses dépôts), **php-fpm** (le gestionnaire FastCGI), `mysqli` (connexion MariaDB), `phar` (archives PHP, requis par wp-cli), `session` (sessions PHP, utilisées par WordPress).
+- `    php83-curl php83-dom php83-mbstring php83-gd php83-xml \` → modules requis par WordPress : `curl` (requêtes HTTP), `dom`/`xml` (XML), `mbstring` (chaînes multi-octets), `gd` (images).
 - `    curl bash` → l'outil `curl` (pour télécharger wp-cli) et `bash`.
+- `RUN ln -sf /usr/bin/php83 /usr/bin/php` → wp-cli démarre par `#!/usr/bin/env php` : il lui faut une commande **`php`** dans le `PATH`. Or Alpine n'installe que `/usr/bin/php83` → sans ce lien symbolique, `wp` répond `not found` au démarrage du conteneur.
+
+> ℹ️ **Pas de `php83-json`** : depuis PHP 8.0 l'extension JSON est **intégrée au cœur**, le
+> paquet séparé n'existe plus. L'ajouter ferait échouer le `apk add` (donc le build).
 - `# wp-cli : l'outil en ligne de commande...` → commentaire.
 - `RUN curl -o /usr/local/bin/wp \` → télécharge wp-cli ; `-o` = enregistre la sortie dans le fichier indiqué.
 - `      https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \` → l'URL du binaire `.phar` de wp-cli.
 - `    && chmod +x /usr/local/bin/wp` → rend `wp` exécutable.
 - `# Config php-fpm : écouter sur 9000...` → commentaire.
-- `COPY conf/www.conf /etc/php82/php-fpm.d/www.conf` → remplace la config du pool php-fpm par **la nôtre** (écoute sur le port 9000).
+- `COPY conf/www.conf /etc/php83/php-fpm.d/www.conf` → remplace la config du pool php-fpm par **la nôtre** (écoute sur le port 9000).
 - `COPY tools/init.sh /usr/local/bin/init.sh` → copie notre script d'init.
 - `RUN chmod +x /usr/local/bin/init.sh` → le rend exécutable.
 - `RUN mkdir -p /var/www/html` → crée le dossier racine du site (où WordPress sera installé et où le volume sera monté).
@@ -630,7 +645,7 @@ if [ ! -f wp-config.php ]; then
 fi
 
 # php-fpm en foreground → PID 1
-exec php-fpm82 -F
+exec php-fpm83 -F
 ```
 **Ligne par ligne :**
 - `#!/bin/sh` → shebang : exécution avec `/bin/sh`.
@@ -662,7 +677,7 @@ exec php-fpm82 -F
 - `        --role=author --user_pass="${WP_USER_PASS}"` → rôle **author** (non-admin) et son mot de passe.
 - `fi` → fin du bloc d'installation.
 - `# php-fpm en foreground → PID 1` → commentaire.
-- `exec php-fpm82 -F` → lance php-fpm en **foreground** (`-F` = *no daemonize*). `exec` remplace le shell → php-fpm devient **PID 1**. ✅
+- `exec php-fpm83 -F` → lance php-fpm en **foreground** (`-F` = *no daemonize*). `exec` remplace le shell → php-fpm devient **PID 1**. ✅
 
 > À noter : la boucle `until mysqladmin ping` est une **vraie** attente de dépendance (autorisée), **pas** un `while true` bidon. C'est la différence entre attendre un service et « fausser » la vie du conteneur.
 
@@ -716,7 +731,7 @@ dans le `.gitignore`).
 
 ### `srcs/requirements/nginx/Dockerfile`
 ```dockerfile
-FROM alpine:3.20
+FROM alpine:3.23
 
 RUN apk update && apk add --no-cache nginx openssl
 
@@ -733,7 +748,7 @@ EXPOSE 443
 ENTRYPOINT ["nginx", "-g", "daemon off;"]
 ```
 **Ligne par ligne :**
-- `FROM alpine:3.20` → image de base Alpine 3.20.
+- `FROM alpine:3.23` → image de base Alpine 3.23.
 - `RUN apk update && apk add --no-cache nginx openssl` → installe le serveur web **nginx** et **openssl** (pour générer le certificat).
 - `# Certificat auto-signé TLS` → commentaire.
 - `RUN mkdir -p /etc/nginx/ssl \` → crée le dossier où stocker la clé et le certificat.
