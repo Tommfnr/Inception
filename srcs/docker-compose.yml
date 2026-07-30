@@ -1,0 +1,74 @@
+services:
+  mariadb:
+    build: ./requirements/mariadb
+    image: mariadb                 # image nommée d'après le service
+    container_name: mariadb
+    restart: always                # redémarre en cas de crash
+    env_file: .env
+    secrets:
+      - db_password
+      - db_root_password
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - inception
+
+  wordpress:
+    build: ./requirements/wordpress
+    image: wordpress
+    container_name: wordpress
+    restart: always
+    depends_on:
+      - mariadb
+    env_file: .env
+    secrets:
+      - db_password
+      - wp_admin_password
+      - wp_user_password
+    volumes:
+      - wp_files:/var/www/html
+    networks:
+      - inception
+
+  nginx:
+    build: ./requirements/nginx
+    image: nginx
+    container_name: nginx
+    restart: always
+    depends_on:
+      - wordpress
+    ports:
+      - "443:443"                  # SEUL port publié vers l'extérieur
+    volumes:
+      - wp_files:/var/www/html     # même volume que WordPress
+    networks:
+      - inception
+
+# Volumes nommés, stockés dans /home/tfournie/data
+volumes:
+  db_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /home/tfournie/data/mariadb
+  wp_files:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: /home/tfournie/data/wordpress
+
+networks:
+  inception:
+    driver: bridge
+
+secrets:
+  db_password:
+    file: ../secrets/db_password.txt
+  db_root_password:
+    file: ../secrets/db_root_password.txt
+  wp_admin_password:
+    file: ../secrets/wp_admin_password.txt
+  wp_user_password:
+    file: ../secrets/wp_user_password.txt

@@ -7,9 +7,17 @@ WP_USER_PASS=$(cat /run/secrets/wp_user_password)
 
 cd /var/www/html
 
-until mysqladmin ping -h mariadb --silent 2>/dev/null; do
-    echo "En attente de MariaDB..."; sleep 2
+i=0
+until nc -z mariadb 3306; do
+    i=$((i + 1))
+    if [ "$i" -ge 30 ]; then
+        echo "MariaDB ne répond pas après 60s, abandon." >&2
+        exit 1
+    fi
+    echo "En attente de MariaDB... ($i/30)"
+    sleep 2
 done
+echo "MariaDB est prêt."
 
 if [ ! -f wp-config.php ]; then
     wp core download --allow-root
@@ -31,5 +39,7 @@ if [ ! -f wp-config.php ]; then
         "${WP_USER}" "${WP_USER_EMAIL}" \
         --role=author --user_pass="${WP_USER_PASS}"
 fi
+
+chown -R nobody:nobody /var/www/html
 
 exec php-fpm83 -F

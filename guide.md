@@ -536,8 +536,11 @@ RUN apk update && apk add --no-cache \
 # wp-cli cherche une commande "php" ; Alpine n'installe que "php83"
 RUN ln -sf /usr/bin/php83 /usr/bin/php
 
+# 128M par défaut : insuffisant pour l'extraction de l'archive par wp-cli
+RUN echo "memory_limit = 512M" > /etc/php83/conf.d/99-inception.ini
+
 # wp-cli : l'outil en ligne de commande pour installer/configurer WordPress
-RUN curl -o /usr/local/bin/wp \
+RUN curl -fS -o /usr/local/bin/wp \
       https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
     && chmod +x /usr/local/bin/wp
 
@@ -563,8 +566,10 @@ ENTRYPOINT ["init.sh"]
 
 > ℹ️ **Pas de `php83-json`** : depuis PHP 8.0 l'extension JSON est **intégrée au cœur**, le
 > paquet séparé n'existe plus. L'ajouter ferait échouer le `apk add` (donc le build).
+- `# 128M par défaut : insuffisant...` → commentaire.
+- `RUN echo "memory_limit = 512M" > /etc/php83/conf.d/99-inception.ini` → crée un fichier de config PHP qui **relève la limite mémoire** à 512 Mo. Tout fichier `.ini` déposé dans `conf.d/` est chargé automatiquement par PHP, **en plus** du `php.ini` principal : c'est la façon propre de surcharger un réglage sans modifier le fichier d'origine. S'applique au **CLI** (donc à wp-cli) **et** à php-fpm. Détail dans l'encadré ci-dessous.
 - `# wp-cli : l'outil en ligne de commande...` → commentaire.
-- `RUN curl -o /usr/local/bin/wp \` → télécharge wp-cli ; `-o` = enregistre la sortie dans le fichier indiqué.
+- `RUN curl -fS -o /usr/local/bin/wp \` → télécharge wp-cli. `-o` = enregistre dans le fichier indiqué ; `-f` = **échoue** si le serveur renvoie une erreur HTTP (sans lui, curl écrirait la page d'erreur 404 dans le fichier et le build « réussirait » avec un `wp` cassé) ; `-S` = affiche quand même le message d'erreur.
 - `      https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \` → l'URL du binaire `.phar` de wp-cli.
 - `    && chmod +x /usr/local/bin/wp` → rend `wp` exécutable.
 - `# Config php-fpm : écouter sur 9000...` → commentaire.
@@ -575,6 +580,36 @@ ENTRYPOINT ["init.sh"]
 - `WORKDIR /var/www/html` → définit ce dossier comme **répertoire de travail** par défaut (les commandes suivantes s'y exécutent).
 - `EXPOSE 9000` → documente le port 9000 (informatif).
 - `ENTRYPOINT ["init.sh"]` → au démarrage, lance notre script (install WordPress **puis** php-fpm en foreground).
+
+#### 💥 Le piège du `memory_limit` (crash en boucle au 1er `make`)
+
+Sans la ligne `memory_limit`, le conteneur wordpress **crashe en boucle** dès le premier
+lancement. Dans `docker logs wordpress` :
+```
+Downloading WordPress 7.0.2 (en_US)...
+md5 hash verified: ...
+PHP Fatal error:  Allowed memory size of 134217728 bytes exhausted
+  (tried to allocate 36864 bytes) in phar:///usr/local/bin/wp/vendor/wp-cli/wp-cli/php/WP_CLI/Extractor.php
+```
+**Cause :** `wp core download` extrait l'archive WordPress **en mémoire**, et la limite PHP par
+défaut (`128M` = 134217728 octets) n'y suffit pas. Le script meurt, `restart: always` relance le
+conteneur, qui recrashe au même endroit → boucle sans fin.
+
+**Symptôme trompeur :** dans `docker ps` le conteneur a l'air de « démarrer », et côté MariaDB
+tu vois défiler des `Aborted connection ... without authentication`. Ces avertissements sont
+**normaux** (c'est le `nc -z` qui teste le port puis raccroche) — ils ne sont pas la cause, juste
+le reflet des redémarrages.
+
+> ⚠️ **La solution qu'on trouve partout en ligne ne marche PAS ici.** La variable
+> `WP_CLI_PHP_ARGS='-d memory_limit=512M'` est lue par le **script wrapper** de wp-cli. Or on
+> télécharge le **`.phar` brut**, qui ne la consulte jamais. Testé : le crash persiste à
+> l'identique. Il faut passer par un fichier `.ini`, ou à défaut appeler
+> `php -d memory_limit=512M /usr/local/bin/wp ...` explicitement.
+
+**Pourquoi `conf.d/` et pas éditer `php.ini` ?** PHP charge automatiquement tous les `.ini` du
+dossier `conf.d/`, après le `php.ini` principal. On ajoute donc notre réglage **sans toucher** au
+fichier d'origine — plus propre, plus lisible, et le `99-` en préfixe garantit qu'il est lu en
+dernier (il gagne sur tout le reste).
 
 ### `srcs/requirements/wordpress/conf/www.conf` (extrait clé)
 ```ini
@@ -617,10 +652,18 @@ WP_USER_PASS=$(cat /run/secrets/wp_user_password)
 
 cd /var/www/html
 
-# Attendre que MariaDB accepte les connexions
-until mysqladmin ping -h mariadb --silent 2>/dev/null; do
-    echo "En attente de MariaDB..."; sleep 2
+# Attendre que MariaDB accepte les connexions (60 s max, puis on abandonne)
+i=0
+until nc -z mariadb 3306; do
+    i=$((i + 1))
+    if [ "$i" -ge 30 ]; then
+        echo "MariaDB ne répond pas après 60s, abandon." >&2
+        exit 1
+    fi
+    echo "En attente de MariaDB... ($i/30)"
+    sleep 2
 done
+echo "MariaDB est prêt."
 
 if [ ! -f wp-config.php ]; then
     wp core download --allow-root
@@ -644,6 +687,9 @@ if [ ! -f wp-config.php ]; then
         --role=author --user_pass="${WP_USER_PASS}"
 fi
 
+# wp-cli tourne en root, php-fpm en nobody → il doit pouvoir écrire
+chown -R nobody:nobody /var/www/html
+
 # php-fpm en foreground → PID 1
 exec php-fpm83 -F
 ```
@@ -654,10 +700,18 @@ exec php-fpm83 -F
 - `WP_ADMIN_PASS=$(cat /run/secrets/wp_admin_password)` → lit le mot de passe de l'admin WordPress.
 - `WP_USER_PASS=$(cat /run/secrets/wp_user_password)` → lit le mot de passe du 2e utilisateur.
 - `cd /var/www/html` → se place dans le dossier du site (où wp-cli travaille).
-- `# Attendre que MariaDB accepte les connexions` → commentaire.
-- `until mysqladmin ping -h mariadb --silent 2>/dev/null; do` → **boucle** tant que MariaDB ne répond pas : `mysqladmin ping` teste la DB sur l'hôte `mariadb` ; `--silent` réduit le bruit ; `2>/dev/null` masque les erreurs. La boucle s'arrête dès que la commande réussit.
-- `    echo "En attente de MariaDB..."; sleep 2` → affiche un message et attend 2 s avant de réessayer.
+- `# Attendre que MariaDB accepte les connexions...` → commentaire.
+- `i=0` → compteur de tentatives, remis à zéro avant la boucle.
+- `until nc -z mariadb 3306; do` → **boucle** tant que le port 3306 du conteneur `mariadb` n'est pas ouvert. `nc` (netcat) est fourni par **busybox**, déjà présent dans Alpine → aucun paquet à installer. `-z` = *scan only* : teste juste si le port répond, sans envoyer de données. La boucle s'arrête dès que `nc` réussit (code retour 0).
+- `    i=$((i + 1))` → incrémente le compteur à chaque tour.
+- `    if [ "$i" -ge 30 ]; then` → au bout de **30 tours × 2 s = 60 s**…
+- `        echo "MariaDB ne répond pas après 60s, abandon." >&2` → message d'erreur sur la **sortie d'erreur** (`>&2`), visible dans `docker logs`.
+- `        exit 1` → **fait échouer le conteneur** au lieu de le laisser boucler dans le vide. Un conteneur qui plante avec un message clair se débugge ; un conteneur qui boucle en silence, non.
+- `    fi` → fin du garde-fou.
+- `    echo "En attente de MariaDB... ($i/30)"` → affiche la progression.
+- `    sleep 2` → attend 2 s avant de réessayer.
 - `done` → fin de la boucle d'attente.
+- `echo "MariaDB est prêt."` → confirme la sortie de boucle (repère utile dans les logs).
 - `if [ ! -f wp-config.php ]; then` → **si** WordPress n'est pas encore installé (pas de `wp-config.php`) → on installe. Au 2e démarrage il existe → on saute le bloc.
 - `    wp core download --allow-root` → télécharge les fichiers du cœur WordPress. `--allow-root` autorise wp-cli à tourner en root.
 - `    wp config create --allow-root \` → génère le fichier `wp-config.php`…
@@ -676,10 +730,74 @@ exec php-fpm83 -F
 - `        "${WP_USER}" "${WP_USER_EMAIL}" \` → son login et son email (arguments positionnels).
 - `        --role=author --user_pass="${WP_USER_PASS}"` → rôle **author** (non-admin) et son mot de passe.
 - `fi` → fin du bloc d'installation.
+- `# wp-cli tourne en root, php-fpm en nobody...` → commentaire.
+- `chown -R nobody:nobody /var/www/html` → donne la **propriété** des fichiers du site à `nobody`. `chown` = *change owner*, `-R` = récursif (le dossier **et** tout son contenu). Détail complet dans l'encadré ci-dessous.
 - `# php-fpm en foreground → PID 1` → commentaire.
 - `exec php-fpm83 -F` → lance php-fpm en **foreground** (`-F` = *no daemonize*). `exec` remplace le shell → php-fpm devient **PID 1**. ✅
 
-> À noter : la boucle `until mysqladmin ping` est une **vraie** attente de dépendance (autorisée), **pas** un `while true` bidon. C'est la différence entre attendre un service et « fausser » la vie du conteneur.
+#### 🔑 Pourquoi le `chown` est nécessaire
+
+Sous Unix, chaque fichier a un **propriétaire** et des droits en trois catégories :
+```
+-rw-r--r--  root  root   index.php
+ ↑↑↑↑↑↑↑↑↑
+ │  │   └── les autres : lecture seule
+ │  └────── le groupe  : lecture seule
+ └───────── le proprio : lecture + écriture
+```
+La chaîne dans notre conteneur :
+1. `wp core download --allow-root` tourne **en root** → tous les fichiers appartiennent à `root`
+2. `exec php-fpm83 -F` démarre, mais le pool tourne **en `nobody`** (cf. `www.conf`)
+3. `nobody` n'est ni propriétaire ni dans le groupe → il tombe dans « les autres » → **lecture seule**
+
+Le site **s'affiche** très bien (lire suffit), mais dès que WordPress veut **écrire**, ça bloque :
+upload d'image, installation de plugin/thème, mise à jour. Message typique dans l'admin :
+> *Impossible de créer le répertoire wp-content/uploads/… Son répertoire parent est-il
+> accessible en écriture par le serveur ?*
+
+**Pourquoi `nobody` et pas root ?** `nobody` est un utilisateur système volontairement **sans
+aucun privilège**. Si une faille d'un plugin WordPress est exploitée, l'attaquant hérite des
+droits du processus PHP : avec `nobody` il n'atteint que les fichiers du site, avec root il
+contrôlerait tout le conteneur. C'est le principe du **moindre privilège**.
+
+**Pourquoi après le `fi` et pas dedans ?** Placé à l'extérieur, le `chown` s'exécute à **chaque**
+démarrage : il rattrape les fichiers des lancements précédents et se réapplique même quand
+l'installation est sautée (2e démarrage). Coût négligeable.
+
+> À noter : cette boucle d'attente est une **vraie** attente de dépendance (autorisée), **pas** un
+> `while true` bidon. C'est la différence entre attendre un service et « fausser » la vie du
+> conteneur. Le `exit 1` au bout de 60 s le prouve : la boucle a une **fin**, elle ne sert pas à
+> maintenir le conteneur en vie artificiellement.
+
+#### ⚠️ Le piège classique : `mysqladmin ping`
+
+La plupart des tutos proposent d'attendre avec :
+```sh
+until mysqladmin ping -h mariadb --silent 2>/dev/null; do ...   # NE MARCHE PAS ICI
+```
+**`mysqladmin` n'existe pas dans l'image wordpress.** Il vient du paquet `mariadb-client`,
+installé dans l'image **mariadb** — mais les images sont **totalement séparées**, elles ne
+partagent aucun binaire. Résultat en cascade :
+
+1. `mysqladmin` → *command not found* → code retour ≠ 0
+2. `until` interprète ça comme « MariaDB pas prête » → il boucle
+3. `2>/dev/null` **avale le message d'erreur** → aucune trace du vrai problème
+4. tu ne vois que `En attente de MariaDB...` toutes les 2 s, **indéfiniment**
+
+Et `set -e` ne te sauve pas : une commande qui échoue dans la **condition** d'un `until`
+(ou d'un `while`/`if`) n'est pas traitée comme une erreur, juste comme une condition fausse.
+C'est le comportement normal du shell, mais ici il masque la panne.
+
+**Deux solutions, au choix :**
+| Solution | Ce qu'il faut faire | Coût |
+|---|---|---|
+| `nc -z mariadb 3306` (retenue) | rien — busybox le fournit déjà | 0 |
+| `mysqladmin ping` | ajouter `mariadb-client` aux paquets du Dockerfile wordpress | quelques Mo |
+
+> 💡 **Pourquoi un simple test de port suffit ici :** notre `init.sh` MariaDB initialise la base
+> avec `mysqld --bootstrap`, qui travaille **hors réseau** et n'ouvre aucun port. Le serveur ne
+> se met à écouter qu'au `exec mysqld` final, une fois l'init terminée. Donc « port 3306
+> ouvert » = « base réellement prête » : pas de faux positif possible.
 
 ### ✅ Tester l'étape 4 (WordPress + php-fpm)
 **Objectif :** php-fpm démarre en **foreground** (port 9000), WordPress s'installe, et les
@@ -834,8 +952,9 @@ http {
 `inception_test`.)
 ```bash
 # 1. Syntaxe de la config, SANS lancer le serveur (--entrypoint pour ne pas heriter du "daemon off;")
+#    --network est OBLIGATOIRE : nginx resout "wordpress" au chargement de la conf
 docker build -t nginx srcs/requirements/nginx
-docker run --rm --entrypoint nginx nginx -t     # "syntax is ok" + "test is successful"
+docker run --rm --network inception_test --entrypoint nginx nginx -t
 
 # 2. Lancer NGINX sur le reseau et publier 443
 docker rm -f nginx 2>/dev/null || true
@@ -857,6 +976,67 @@ openssl s_client -connect localhost:443 -tls1   </dev/null 2>&1 \
 php-fpm fonctionnel.
 > Note : ton `openssl` local peut refuser `-tls1` de lui-même (TLS 1.0 désactivé côté client)
 > → l'échec est attendu dans les deux cas, c'est bien la preuve que 1.0 ne passe pas.
+
+#### ⚠️ `nginx -t` échoue toujours hors réseau
+
+```
+nginx: [emerg] host not found in upstream "wordpress" in /etc/nginx/nginx.conf:23
+```
+Ce n'est **pas** une erreur de ta config. NGINX résout les noms d'*upstream* (`fastcgi_pass
+wordpress:9000`) **au chargement**, pas à la première requête. Un conteneur lancé sans
+`--network` n'a pas le DNS docker et ne peut pas résoudre `wordpress` → le test échoue même avec
+une config parfaite. D'où le `--network` ci-dessus.
+
+> Conséquence au démarrage réel : si le conteneur `wordpress` n'existe pas encore, NGINX refuse
+> de démarrer. C'est ce que gère `depends_on: wordpress` dans le compose (plus `restart: always`
+> qui rattrape le cas limite).
+
+#### 🔒 Tester sans sudo (Docker rootless, postes 42)
+
+En mode rootless, publier le **443** est **interdit** (ports < 1024 réservés à root), et sans sudo
+tu ne peux pas non plus écrire dans `/etc/hosts`. Les deux se contournent : on lance NGINX sur le
+réseau **sans publier de port**, et on l'interroge depuis un conteneur voisin.
+
+```bash
+# 1. La base et WordPress via compose (ils ne publient aucun port)
+docker compose -f srcs/docker-compose.yml up -d --build mariadb wordpress
+
+# 2. NGINX a la main, SANS -p, sur le meme reseau
+docker build -t nginx_local srcs/requirements/nginx
+docker run -d --name nginx_local --network srcs_inception \
+  -v srcs_wp_files:/var/www/html nginx_local
+
+# 3. Interroger depuis un conteneur voisin (--add-host remplace /etc/hosts)
+IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' nginx_local)
+docker run --rm --network srcs_inception --add-host tfournie.42.fr:$IP alpine:3.23 \
+  sh -c 'apk add --no-cache curl >/dev/null && curl -kI https://tfournie.42.fr'
+
+# 4. NETTOYER (sinon conteneur orphelin -> conflit de nom au prochain make)
+docker rm -f nginx_local && docker rmi nginx_local
+```
+**Les en-têtes qui prouvent que tout fonctionne :**
+| En-tête reçu | Ce qu'il démontre |
+|---|---|
+| `HTTP/1.1 200 OK` | TLS négocié, requête servie |
+| `Server: nginx/1.28.x` | NGINX répond sur 443 |
+| `X-Powered-By: PHP/8.3.x` | le PHP a été **exécuté** → `fastcgi_pass` fonctionne |
+| `Link: <https://tfournie.42.fr/…rest_route=/>` | **WordPress a tourné** → il a interrogé MariaDB |
+
+Ce dernier en-tête est le plus parlant : WordPress le génère à partir de l'option `siteurl`
+stockée **en base**. Le recevoir prouve que les trois conteneurs ont communiqué de bout en bout.
+
+**Tester les versions TLS sans se tromper** — `openssl s_client` affiche une ligne `Protocol :`
+avec le protocole **tenté**, même quand le handshake a échoué. Pour un verdict fiable, exige une
+vraie réponse HTTP :
+```bash
+for v in TLSv1 TLSv1.1 TLSv1.2 TLSv1.3; do
+  out=$(printf 'HEAD / HTTP/1.0\r\nHost: tfournie.42.fr\r\n\r\n' | \
+        openssl s_client -connect nginx_local:443 -min_protocol $v -max_protocol $v \
+        -cipher 'DEFAULT@SECLEVEL=0' -quiet 2>&1)
+  echo "$out" | grep -q 'HTTP/1' && echo "$v -> ACCEPTE" || echo "$v -> REFUSE"
+done
+```
+**Attendu :** `TLSv1 -> REFUSE`, `TLSv1.1 -> REFUSE`, `TLSv1.2 -> ACCEPTE`, `TLSv1.3 -> ACCEPTE`.
 
 ---
 
@@ -957,7 +1137,7 @@ secrets:
 - `    build: ./requirements/wordpress` → build depuis son Dockerfile.
 - `    image: wordpress` / `    container_name: wordpress` → nom de l'image et du conteneur.
 - `    restart: always` → redémarrage auto.
-- `    depends_on:` / `      - mariadb` → démarre **après** mariadb (ordre de lancement ; n'attend pas que la DB soit *prête*, d'où la boucle `mysqladmin ping`).
+- `    depends_on:` / `      - mariadb` → démarre **après** mariadb (ordre de **lancement** seulement ; n'attend **pas** que la DB soit *prête à répondre*, d'où la boucle `nc -z` dans `init.sh`).
 - `    env_file: .env` → variables d'env.
 - `    secrets:` (`db_password`, `wp_admin_password`, `wp_user_password`) → les 3 secrets utiles à WordPress.
 - `    volumes:` / `      - wp_files:/var/www/html` → monte le volume des fichiers du site.
@@ -1042,8 +1222,11 @@ down:
 clean: down
 	docker system prune -af
 
-fclean: clean
-	sudo rm -rf $(DATA)/mariadb $(DATA)/wordpress
+# Remise à zéro totale : conteneurs + volumes + données + images
+fclean:
+	docker compose -f $(COMPOSE) down -v
+	docker run --rm -v $(DATA):/data alpine:3.23 rm -rf /data/mariadb /data/wordpress
+	docker system prune -af
 
 re: fclean up
 
@@ -1062,9 +1245,38 @@ re: fclean up
 - `→ docker compose -f $(COMPOSE) down` → arrête et supprime les conteneurs et le réseau (garde les volumes/données).
 - `clean: down` → `clean` exécute d'abord `down`…
 - `→ docker system prune -af` → supprime **tout** ce qui est inutilisé (images, conteneurs arrêtés, réseaux…). `-a` = tout, `-f` = sans confirmation.
-- `fclean: clean` → `fclean` exécute d'abord `clean`…
-- `→ sudo rm -rf $(DATA)/mariadb $(DATA)/wordpress` → **supprime les données** des volumes sur l'hôte (remise à zéro totale). `sudo` car les fichiers appartiennent à des UID internes aux conteneurs.
+- `fclean:` → cible de remise à zéro **totale**. Elle ne dépend pas de `clean` : les trois commandes sont écrites explicitement pour maîtriser leur **ordre**.
+- `→ docker compose -f $(COMPOSE) down -v` → arrête les conteneurs **et** supprime les volumes nommés (`-v`), ce que `down` seul ne fait pas.
+- `→ docker run --rm -v $(DATA):/data alpine:3.23 rm -rf /data/mariadb /data/wordpress` → **efface les données** sur l'hôte. Détail dans l'encadré ci-dessous.
+- `→ docker system prune -af` → supprime images et ressources inutilisées. **En dernier**, sinon il effacerait l'image `alpine` dont la ligne précédente a besoin.
 - `re: fclean up` → **rebuild total** : `fclean` puis `up`.
+
+#### 🗑️ Pourquoi effacer les données depuis un conteneur (et pas avec `sudo rm -rf`)
+
+La version qu'on voit partout est `sudo rm -rf $(DATA)/...`. Elle a **deux défauts** :
+
+1. **Elle exige sudo**, que tu n'as pas forcément (postes de l'école).
+2. **Un `rm -rf` en sudo sur une variable Make** est un couteau sans manche : une variable
+   `DATA` vide ou mal écrite et tu effaces autre chose, en root.
+
+Regarde à qui appartiennent réellement les données :
+```
+$ ls -ld /home/tfournie/data/mariadb
+drwxr-x--- 6 203348 203349 ... /home/tfournie/data/mariadb
+$ id -u
+103249                          # <- ce n'est pas toi
+```
+Ces UID sont ceux de l'utilisateur `mysql` **à l'intérieur** du conteneur. En Docker rootless
+ils sont *remappés* dans une plage qui t'est réservée mais que tu ne possèdes pas directement :
+un `rm -rf` en ton nom échoue avec *Permission denied*.
+
+**La solution :** un conteneur jetable, qui est root dans son propre espace de noms et peut donc
+supprimer ces fichiers. Ça marche **dans les deux modes** — Docker en root (VM) comme rootless
+(poste 42) — et **sans jamais de sudo**.
+
+> ⚠️ **`docker system prune -af` n'est pas ciblé :** il supprime **toutes** les images inutilisées
+> de la machine, y compris celles de tes autres projets. C'est voulu ici (quota `/goinfre`), mais
+> sache-le. Version chirurgicale si besoin : `docker rmi nginx wordpress mariadb`.
 - `.PHONY: all up down clean fclean re` → déclare ces cibles comme « fausses » (pas des fichiers) → make les exécute toujours, même si un fichier du même nom existe.
 
 > ⚠️ Tabulations (pas d'espaces) pour l'indentation des recettes Makefile.
@@ -1191,11 +1403,15 @@ curl -kI https://tfournie.42.fr
 **Pannes fréquentes :**
 | Symptôme | Piste |
 |---|---|
-| `wordpress` redémarre en boucle | MariaDB pas prête → vérifie la boucle `mysqladmin ping` et l'hôte `mariadb`. |
+| `wordpress` redémarre en boucle | MariaDB pas prête → vérifie la boucle `nc -z mariadb 3306` et le nom d'hôte `mariadb`. |
+| `wordpress` bloqué sur « En attente de MariaDB… » à l'infini | La commande de test **n'existe pas** dans l'image (cas `mysqladmin`) → voir le piège à l'étape 4. Vérifie avec `docker exec wordpress which nc`. |
 | `Error establishing a database connection` | mauvais `--dbhost` (doit être `mariadb:3306`) ou `bind-address` de MariaDB. |
 | NGINX 502 | `fastcgi_pass` ne pointe pas sur `wordpress:9000`, ou php-fpm pas en 9000. |
 | Certif refusé | normal (auto-signé) → `curl -k` ou « accepter le risque » dans le navigateur. |
 | DB pas persistée après `down/up` | le volume ne pointe pas vers `/home/tfournie/data/...`. |
+| `wordpress` crashe en boucle, logs = `Allowed memory size ... exhausted` | `memory_limit` trop bas pour `wp core download` → voir le piège à l'étape 4. |
+| `Conflict. The container name "/mariadb" is already in use` | Un conteneur des **tests manuels** (étapes 3/4) traîne encore. Un conteneur **arrêté réserve son nom**, et `docker ps` ne le montre pas → `docker ps -a` puis `docker rm -f mariadb wordpress nginx`. `make down` ne l'enlèvera **pas** (compose ne gère que ses propres conteneurs). |
+| `cannot expose privileged port 443 ... (currently 1024)` | Docker en mode **rootless** (cas des postes 42) : les ports < 1024 sont interdits. Pas un bug du projet — sur la VM, Docker tourne en root et le 443 passe. Contournement si tu as sudo : `sudo sysctl -w net.ipv4.ip_unprivileged_port_start=443`. **Ne change pas** le `"443:443"` du compose, le sujet l'impose. |
 
 ---
 

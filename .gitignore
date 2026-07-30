@@ -1,9 +1,3 @@
-# ============================================================
-#  Inception - .gitignore
-#  RAPPEL SUJET : tout credential/mot de passe/clé trouvé
-#  dans le repo Git = ÉCHEC du projet. On blinde ici.
-# ============================================================
-
 # --- Variables d'environnement (mots de passe, config) ---
 .env
 *.env
@@ -36,4 +30,3 @@ Thumbs.db
 *.swp
 *~
 .vscode/
-.idea/
