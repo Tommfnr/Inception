@@ -31,10 +31,20 @@ Puis **se déconnecter / reconnecter** pour activer sudo.
 Permet de bosser depuis son vrai terminal (copier/coller, onglets) au lieu
 de la fenêtre VirtualBox.
 
-**a. Vérifier que le serveur SSH tourne dans la VM :**
+**a. Vérifier que le serveur SSH écoute vraiment dans la VM :**
 ```bash
-sudo systemctl status ssh
-# si absent : sudo apt install -y openssh-server && sudo systemctl enable --now ssh
+sudo ss -tlnp | grep ':22'      # doit afficher 0.0.0.0:22 (ou *:22)
+```
+C'est **le seul test qui compte**. `systemctl status ssh` peut afficher `enabled`
+alors que le service est en `failed` et que rien n'écoute. Si la ligne est vide,
+voir « Dépannage » plus bas. Si elle affiche `127.0.0.1:22`, sshd n'écoute que sur
+la loopback de la VM et le NAT ne pourra jamais l'atteindre : retirer la ligne
+`ListenAddress 127.0.0.1` de `/etc/ssh/sshd_config`.
+
+Si le paquet n'est pas installé (case « serveur SSH » non cochée à l'install) :
+```bash
+sudo apt install -y openssh-server
+sudo systemctl enable --now ssh
 ```
 
 **b. VirtualBox en NAT — redirection de port** (une seule fois) :
@@ -44,6 +54,12 @@ sudo systemctl status ssh
 |-----|-------|-----------|-----------|-------------|
 | ssh | TCP   | 127.0.0.1 | 2222      | 22          |
 
+Vérifiable depuis l'hôte, sans ouvrir l'interface graphique :
+```bash
+VBoxManage showvminfo <NomVM> --machinereadable | grep Forwarding
+# -> Forwarding(0)="ssh,tcp,127.0.0.1,2222,,22"
+```
+
 **c. Depuis l'hôte, se connecter :**
 ```bash
 ssh tfournie@127.0.0.1 -p 2222
@@ -52,6 +68,47 @@ ssh-copy-id -p 2222 tfournie@127.0.0.1   # (optionnel) sans retaper le mot de pa
 
 > Si réseau « Accès par pont » (bridged) au lieu de NAT : pas de redirection,
 > récupérer l'IP avec `ip a` puis `ssh tfournie@<IP_de_la_VM>`.
+
+### Dépannage SSH
+
+**`kex_exchange_identification: read: Connection reset by peer`**
+
+VirtualBox accepte bien la connexion côté hôte, mais ne trouve personne sur le
+port 22 de l'invité : il coupe. Le problème est **dans la VM**, pas dans la
+redirection de ports. Dans la VM, demander l'erreur exacte :
+```bash
+sudo sshd -t        # systemd lance ce test avant de démarrer le service
+```
+
+| Message de `sshd -t` | Cause / correction |
+|---|---|
+| `no hostkeys available -- exiting` | Aucune clé d'hôte générée -> `sudo ssh-keygen -A` |
+| `Bad configuration option: ...` | Directive supprimée dans OpenSSH 10 (Debian 13) : `ChallengeResponseAuthentication`, `RSAAuthentication`, `UsePrivilegeSeparation`. Vérifier aussi `/etc/ssh/sshd_config.d/*.conf` |
+| `Missing privilege separation directory: /run/sshd` | Faux positif : systemd crée ce dossier (`RuntimeDirectory=sshd`) au démarrage du service. Ignorer, ou `sudo mkdir -p /run/sshd` pour un test propre |
+
+Puis redémarrer. Un `systemctl start` seul est refusé si systemd a atteint sa
+limite de tentatives (`Start request repeated too quickly`) — il faut réarmer
+le compteur :
+```bash
+sudo sshd -t && sudo systemctl reset-failed ssh && sudo systemctl start ssh
+sudo ss -tlnp | grep ':22'
+```
+
+**`WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!`**
+
+Normal après un `ssh-keygen -A` ou une réinstall de la VM : l'empreinte a
+légitimement changé, ce n'est pas une attaque (c'est une boucle locale).
+Purger l'ancienne entrée **depuis l'hôte** :
+```bash
+ssh-keygen -f ~/.ssh/known_hosts -R "[127.0.0.1]:2222"
+```
+L'ancien fichier est sauvegardé en `~/.ssh/known_hosts.old`. Ne pas chercher
+l'entrée au `grep` : `known_hosts` est haché par défaut sur Debian/Ubuntu.
+
+**`Permission denied (publickey,password,...)`**
+
+Bonne nouvelle : la négociation SSH aboutit, le tunnel fonctionne. Il ne reste
+qu'à taper le bon mot de passe utilisateur de la VM.
 
 ## 2. Installer Docker + docker compose
 
