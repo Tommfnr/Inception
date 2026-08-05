@@ -52,7 +52,7 @@ The site is reachable at **https://tfournie.42.fr**.
 
 ### Why Docker here
 
-Each of the three services is described by a `Dockerfile` I wrote myself, built
+Each of the three services is described by a `Dockerfile`, built
 locally by Docker Compose. Nothing is pulled from Docker Hub except the Alpine
 base image, which the subject explicitly allows. No `latest` tag is used
 anywhere: the base image is pinned to `alpine:3.23`, and every package is
@@ -118,25 +118,18 @@ if they do not exist. Nothing in a `Dockerfile` contains a password.
 
 ### Virtual Machines vs Docker
 
-A virtual machine emulates a full computer: the hypervisor provides virtual
-hardware, and a complete guest OS boots on top of it, with its own kernel. That
-costs gigabytes of disk, hundreds of megabytes of RAM, and a real boot sequence.
+A virtual machine runs a whole computer inside another one: the hypervisor
+provides virtual hardware, and a complete guest OS boots on top of it with its
+own kernel. The isolation is total, but so is the cost — gigabytes of disk,
+hundreds of megabytes of RAM, and a real boot sequence.
 
-A container shares the host kernel and isolates a process using kernel features
-— namespaces (its own view of the filesystem, network, PID tree) and cgroups
-(limits on CPU and memory). There is no second kernel and no boot: starting a
-container means starting a process. That is why the three services here start in
-seconds and why each Alpine image weighs a few dozen megabytes instead of
-several gigabytes.
-
-The trade-off is isolation strength. A VM boundary is enforced by the hypervisor
-and is far harder to escape; a container boundary is enforced by the host
-kernel, so a kernel vulnerability can be a container escape. Containers also
-cannot run a different kernel than the host — no Linux containers on a Windows
-kernel without a VM underneath.
-
-The two are complementary rather than competing, and this project shows it: the
-whole Docker stack runs *inside* a VirtualBox virtual machine.
+Docker builds, runs and deploys containers. A container is an isolated
+environment too, but a far lighter one: it shares the host kernel and isolates a
+single process using namespaces (its own view of the filesystem, network and PID
+tree) and cgroups (limits on CPU and memory). There is no second kernel and no
+boot — starting a container means starting a process. On top of that, an image
+only ever contains what the service actually needs to run, and the whole stack
+comes up with a single command, which makes deployment fast and reproducible.
 
 ### Secrets vs Environment Variables
 
@@ -146,7 +139,7 @@ exposed than it looks:
 
 - it is visible to anyone who can run `docker inspect` on the container;
 - it is inherited by every child process;
-- it commonly leaks into logs, crash reports, and `/proc/<pid>/environ`.
+- it commonly leaks into logs, crash reports.
 
 A Docker secret is mounted as a file inside the container, at
 `/run/secrets/<name>`, on a tmpfs — in memory, never written to the image or to

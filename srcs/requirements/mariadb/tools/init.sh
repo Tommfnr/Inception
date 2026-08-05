@@ -6,7 +6,9 @@ DB_ROOT=$(cat /run/secrets/db_root_password)
 
 if [ ! -d /var/lib/mysql/mysql ]; then
     mariadb-install-db --user=mysql --datadir=/var/lib/mysql --skip-test-db
+fi
 
+if [ ! -f /var/lib/mysql/.init_done ]; then
     cat > /tmp/init.sql <<EOF
 FLUSH PRIVILEGES;
 CREATE DATABASE IF NOT EXISTS \`${MYSQL_DATABASE}\`;
@@ -18,6 +20,7 @@ EOF
 
     mysqld --user=mysql --bootstrap < /tmp/init.sql
     rm -f /tmp/init.sql
+    touch /var/lib/mysql/.init_done
 fi
 
 exec mysqld --user=mysql
