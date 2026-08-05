@@ -137,7 +137,7 @@ the file misleading.
 ### Are the three containers running?
 
 ```bash
-docker compose -f srcs/docker-compose.yml ps
+docker ps
 ```
 
 The three services must appear with the status `Up`. A container in `Restarting`

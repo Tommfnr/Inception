@@ -342,7 +342,7 @@ and tested before being kept:
 
 - Debugging and create the VM's and the SSH access.
 - Explanations, to check my own understanding
-- Drafting this README
+- Drafting the .md files
 
 The infrastructure itself — Dockerfiles, Compose file, service configuration and
 entrypoint scripts — was written and debugged by hand.
