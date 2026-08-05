@@ -172,7 +172,7 @@ matter here:
 1. **Built-in DNS resolution by service name.** `fastcgi_pass wordpress:9000`
    and `--dbhost=mariadb:3306` work because Docker's embedded resolver maps the
    service name to the container IP. No hardcoded IP address, no `--link` (which
-   is deprecated and forbidden by the subject).
+   is forbidden by the subject).
 2. **Isolation by default.** Ports 9000 and 3306 are reachable *only* from
    inside the network. They are never published to the host, so php-fpm and
    MariaDB are unreachable from outside the VM. Only NGINX declares
@@ -286,9 +286,10 @@ the matching passwords are the contents of `secrets/wp_admin_password.txt` and
 ### Verify
 
 ```bash
-docker compose -f srcs/docker-compose.yml ps       # three containers up
-curl -k https://tfournie.42.fr | head              # generated HTML
-docker exec -it wordpress wp post list --allow-root
+docker ps                         # three containers up
+curl -k https://tfournie.42.fr    # show HTML
+docker exec -it wordpress wp post list
+docker exec -it wordpress wp user list
 docker exec -it mariadb mariadb -u root -p wordpress -e "SHOW TABLES;"
 ```
 
@@ -318,39 +319,30 @@ make down && make up
 - [Compose file reference](https://docs.docker.com/reference/compose-file/)
 - [Docker secrets in Compose](https://docs.docker.com/compose/how-tos/use-secrets/)
 - [NGINX documentation](https://nginx.org/en/docs/) — in particular the
-  [FastCGI module](https://nginx.org/en/docs/http/ngx_http_fastcgi_module.html)
+- [FastCGI module](https://nginx.org/en/docs/http/ngx_http_fastcgi_module.html)
 - [PHP-FPM configuration](https://www.php.net/manual/en/install.fpm.configuration.php)
 - [MariaDB knowledge base](https://mariadb.com/kb/en/documentation/)
 - [WP-CLI command reference](https://developer.wordpress.org/cli/commands/)
-- [Alpine Linux packages](https://pkgs.alpinelinux.org/packages)
 
 ### Articles and background
 
-- [Docker: "Container networking"](https://docs.docker.com/engine/network/) —
-  why user-defined bridges provide DNS and host networking does not
-- [Docker: "Manage data in Docker"](https://docs.docker.com/engine/storage/) —
-  volumes versus bind mounts
+- [Understanding notions](https://www.hostinger.com/fr/tutoriels/docker-c-est-quoi)
+—What is docker and how it works
+- [Docker: "Container networking"](https://docs.docker.com/engine/network/)
+—why user-defined bridges provide DNS and host networking does not
+- [Docker: "Manage data in Docker"](https://docs.docker.com/engine/storage/) 
+—volumes versus bind mounts
 - [PID 1 and signal handling in containers](https://docs.docker.com/reference/dockerfile/#entrypoint)
-  — why the daemon must run in the foreground
+— why the daemon must run in the foreground
 
 ### Use of AI
 
-AI (Claude) was used on this project for the following tasks, always reviewed
+AI was used on this project for the following tasks, always reviewed
 and tested before being kept:
 
-- **Debugging the VM's SSH access.** Diagnosing a
-  `kex_exchange_identification: Connection reset by peer` when connecting from
-  the host through the VirtualBox NAT port forward. The cause was that the VM
-  had no SSH host keys, so `sshd -t` failed and systemd refused to start
-  `ssh.service`. Fixed with `ssh-keygen -A` and `systemctl reset-failed ssh`.
-- **Writing the SSH troubleshooting section of `SETUP_VM.md`**, from the errors
-  actually encountered during that session.
-- **Explanations, to check my own understanding**, on two points: how the
-  default WordPress page is generated at each request (NGINX → FastCGI → php-fpm
-  → MariaDB → template hierarchy), and how the ports of the three services map
-  onto each other across the configuration files.
-- **Drafting this README**, from the subject and from the project's own
-  configuration files.
+- Debugging and create the VM's and the SSH access.
+- Explanations, to check my own understanding
+- Drafting this README
 
 The infrastructure itself — Dockerfiles, Compose file, service configuration and
 entrypoint scripts — was written and debugged by hand.
