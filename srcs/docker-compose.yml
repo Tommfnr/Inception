@@ -1,9 +1,9 @@
 services:
   mariadb:
     build: ./requirements/mariadb
-    image: mariadb                 # image nommée d'après le service
+    image: mariadb
     container_name: mariadb
-    restart: always                # redémarre en cas de crash
+    restart: always
     env_file: .env
     secrets:
       - db_password
@@ -38,13 +38,12 @@ services:
     depends_on:
       - wordpress
     ports:
-      - "443:443"                  # SEUL port publié vers l'extérieur
+      - "443:443"
     volumes:
-      - wp_files:/var/www/html     # même volume que WordPress
+      - wp_files:/var/www/html
     networks:
       - inception
 
-# Volumes nommés, stockés dans /home/tfournie/data
 volumes:
   db_data:
     driver: local
